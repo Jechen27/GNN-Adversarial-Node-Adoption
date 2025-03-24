@@ -72,8 +72,6 @@ class PriorityApproach(BaseAttack):
 
         high_degree_nodes = self.get_high_degree_nodes(adj, labels, budget)
 
-        self.perturbations = []
-
         perturbation_count = 0
 
         modified_adj = sp.csr_matrix(adj.numpy()).tolil()

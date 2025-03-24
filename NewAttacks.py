@@ -42,11 +42,11 @@ class TargetedMetaAttack(Metattack):
         self.target_label = target_label  # Target label to perturb toward
 
     def self_training_label(self, labels, idx_train):
-        #Override self-training labels to use the target label for unlabeled nodes.
-        labels_self_training = super().self_training_label(labels, idx_train)
+        # Initialize labels_self_training with the target label for all nodes
+        labels_self_training = torch.full_like(labels, self.target_label)
         
-        # Set unlabeled nodes to the target label
-        labels_self_training[idx_unlabeled] = self.target_label
+        # Retain the true labels for the training set
+        labels_self_training[idx_train] = labels[idx_train]
         
         return labels_self_training
 
@@ -91,7 +91,7 @@ class TargetedPGDAttack(PGDAttack):
         target_labels = torch.full_like(labels, self.target_label)
         
         if self.loss_type == "CE":
-            loss = F.nll_loss(output, target_labels)
+            loss = -F.nll_loss(output, target_labels)
         
         elif self.loss_type == "CW":
             onehot = utils.tensor2onehot(target_labels)
@@ -103,6 +103,6 @@ class TargetedPGDAttack(PGDAttack):
                 output[torch.arange(len(output)), target_labels] -
                 output[torch.arange(len(output)), best_other_class]
             )
-            loss = -torch.clamp(margin, min=0).mean()  # Negative to maximize margin
+            loss = torch.clamp(margin, min=0).mean()  # Negative to maximize margin
         
         return loss

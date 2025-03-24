@@ -10,7 +10,7 @@ import random
 
 
 class AdversarialNetwork:
-    def __init__(self, adj, features, labels, gnn, agent1, idx1, agent2, idx2, rounds, budget, device):
+    def __init__(self, adj, features, labels, gnn, agent1, idx1, agent2, idx2, rounds, budget, idx_train, idx_unlabeled, device):
         self.adj = adj
         self.features = features
         self.labels = labels
@@ -24,6 +24,8 @@ class AdversarialNetwork:
         self.budget=budget
         self.budget1=budget
         self.budget2=budget
+        self.idx_train=idx_train
+        self.idx_unlabeled=idx_unlabeled
         self.device=device
 
     def runRound(self):
@@ -43,7 +45,7 @@ class AdversarialNetwork:
 
             if isinstance(self.agent1, Nettack):  
                 candidate_nodes = np.where(self.labels != self.idx1)[0]
-                np.random.shuffle(candidate_nodes)  # Randomize the order
+                np.random.shuffle(candidate_nodes) 
 
                 for node in candidate_nodes:
                     if used_budget1 >= round_budget1:
@@ -52,7 +54,7 @@ class AdversarialNetwork:
                     # Attack the node with Nettack
                     while self.labels[node] != self.idx1 and used_budget1 < round_budget1:
                         self.agent1.attack(features=self.features, adj=self.adj, labels=self.labels, target_node=node, n_perturbations=1)
-                        self.adj = torch.tensor(self.agent1.modified_adj.toarray())  
+                        modified_adj1 = torch.tensor(self.agent1.modified_adj.toarray())  
                         used_budget1 += 1 
 
                         # Update labels after the attack
@@ -63,23 +65,24 @@ class AdversarialNetwork:
                 self.adj = modified_adj1
                 used_budget1 = round_budget1
             elif isinstance(self.agent1, TargetedMetaAttack):
-                modified_adj1 = self.agent1.attack(
-                adj=self.adj,
-                features=self.features,
+                self.agent1.attack(
+                ori_adj=self.adj,
+                ori_features=self.features,
                 labels=self.labels,
-                idx_attack=self.idx1,
-                n_perturbations=used_budget1,
-                device=self.device
+                idx_train=self.idx_train,
+                idx_unlabeled=self.idx_unlabeled,
+                n_perturbations=round_budget1
             )
+                modified_adj1 = self.agent1.modified_adj
             elif isinstance(self.agent1, TargetedPGDAttack):
-                modified_adj1 = self.agent1.attack(
-                adj=self.adj,
-                features=self.features,
+                self.agent1.attack(
+                ori_adj=self.adj,
+                ori_features=self.features,
                 labels=self.labels,
-                idx_attack=self.idx1,
-                n_perturbations=used_budget1,
-                device=self.device
+                idx_train=self.idx_train,
+                n_perturbations=round_budget1
             )
+                modified_adj1 = self.agent1.modified_adj
             else:
                 # For other agents (e.g., PriorityApproach)
                 modified_adj1 = self.agent1.attack(self.adj, self.features, self.labels, round_budget1, device=self.device)
@@ -127,26 +130,24 @@ class MRP:
 
     def attack(self, adj, features, labels, budget, **kwargs):
         selected_nodes = torch.multinomial(self.regret, budget, replacement=False)
-        modified_adj = adj.clone()  # Modify this to implement the attack
+        modified_adj = adj.clone() 
         remaining_budget = budget
 
         for node in selected_nodes:
             while remaining_budget > 0:
-                perturb_node_to_target_class(self.model, adj, features, labels, node, self.target_class, remaining_budget)
+                modified_adj, remaining_budget = perturb_node_to_target_class(self.model, adj, features, labels, node, self.target_class, remaining_budget)
 
         self.regret /= self.regret.sum()
 
         return modified_adj
     
     def update(self, selected_nodes, features, adj, labels):
-        # Ensure selected_nodes is a tensor
         selected_nodes = torch.tensor(selected_nodes, device=self.device)
 
         self.model.eval()
         with torch.no_grad():
             output = self.model(features, adj)
 
-        # Compute the loss for each nodde
         losses = F.nll_loss(output[selected_nodes], labels[selected_nodes], reduction='none')
 
         # Normalize losses
@@ -159,7 +160,7 @@ class MRP:
 
         # Ensure regret probabilities remain valid (non-negative and sum to 1)
         self.regret = torch.clamp(self.regret, min=0)  # Ensure non-negative probabilities
-        self.regret /= self.regret.sum()  # Normalize to ensure probabilities sum to 1
+        self.regret /= self.regret.sum()  # Normalize
 
     def monte_carlo_tree_search(self, adj, features, labels, remaining_budget, curRound, rounds, num_simulations=100):
         root = MCTSNode(adj, features, labels, remaining_budget, curRound, rounds, None)
@@ -183,18 +184,15 @@ class MRP:
         return int(best_action)
 
     def select(self, node):
-        """
-        Traverse the tree from the root node to a leaf node using UCB1.
-        """
         while node.children:
             # Use UCB1 to select the best child
             node = max(node.children.values(), key=lambda n: n.value + (2 * math.log(node.visits) / n.visits) ** 0.5)
         return node
 
     def expand(self, node):
-        """
-        Expand the leaf node by adding child nodes for unexplored actions.
-        """
+        if node.remaining_budget <= 0 or node.curRound >= node.rounds:
+            return  
+
         # Possible actions: Spend budget on a node or save budget
         for node_id in self.other_class_nodes:
             if node_id not in node.children:
@@ -208,33 +206,29 @@ class MRP:
             node.children["save"] = MCTSNode(node.adj, node.features, node.labels, node.remaining_budget, node.curRound + 1, node.rounds, node)
 
     def simulate(self, node):
-        """
-        Simulate the game forward from the leaf node to estimate the value of the node.
-        """
-        if node.curRound > node.rounds or remaining_budget <= 0:
-            node.value = 0
-            return node.value
-        if isinstance(node.adj, torch.Tensor):
-            modified_adj = node.adj
-        else:
-            modified_adj = torch.tensor(node.adj.toarray())
-        remaining_budget = node.remaining_budget
-        num_nodes = modified_adj.size(0)
-        all_edges = torch.LongTensor([(i, j) for i in range(num_nodes) for j in range(num_nodes) if i != j]).t()
+        # Clone the current state
+        sim_adj = node.adj.clone()
+        sim_budget = node.remaining_budget
+        sim_round = node.curRound
 
-        edge_weight_dense = modified_adj.clone().detach().requires_grad_(True)
-        output = self.model(node.features, all_edges, edge_weight_dense[all_edges[0], all_edges[1]])
-        predicted_class = torch.argmax(output[node]).item()
+        while sim_budget > 0 and sim_round < node.rounds:
+            spend_this_round = random.randint(1, min(sim_budget, 5))
 
-        if predicted_class == self.target_class:
-            node.value+=1
-            return node.value
+            # Perturb nodes using the allocated budget
+            for _ in range(spend_this_round):
+                node_to_attack = random.choice(self.other_class_nodes)
+                sim_adj = self.perturb_node(sim_adj, node_to_attack)
 
-        loss = F.nll_loss(output[[node]], torch.tensor([self.target_class], device=output.device))
+            sim_budget -= spend_this_round
+            sim_round += 1 
 
-        node.value += min(1.0 / loss, 1)
-    
-        return node.value
+        # Evaluate the final attack success
+        with torch.no_grad():
+            output = self.model(node.features, sim_adj)
+            target_nodes_mask = (node.labels != self.target_class)
+            success_rate = (output[target_nodes_mask].argmax(1) == self.target_class).float().mean()
+
+        return success_rate.item() 
 
     def backpropagate(self, node, reward):
         while node is not None:
@@ -268,7 +262,7 @@ class MRP:
         edge_weight_grad[modified_adj == 1] = -float('inf')  # Ignore existing edges
 
         best_grad = torch.argmax(edge_weight_grad).item()
-        u, v = torch.div(best_grad, num_nodes, rounding_mode='floor').item(), (best_gradx % num_nodes).item()
+        u, v = torch.div(best_grad, num_nodes, rounding_mode='floor').item(), (best_grad % num_nodes).item()
         if (modified_adj[u, v] != 1):
             modified_adj[u, v] = 1
             modified_adj[v, u] = 1

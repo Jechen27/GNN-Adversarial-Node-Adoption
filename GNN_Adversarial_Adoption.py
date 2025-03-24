@@ -85,7 +85,7 @@ elif agent_name.lower() == 'pgd':
 
 agent2 = PriorityApproach(model=surrogate_model,target_class=classidx2)
 
-game = AdversarialNetwork(adj, features, labels, surrogate_model, agent1, classidx1, agent2, classidx2, 10, 100, device)
+game = AdversarialNetwork(adj, features, labels, surrogate_model, agent1, classidx1, agent2, classidx2, 10, 100, idx_train, torch.cat([torch.tensor(idx_val), torch.tensor(idx_test)]),device)
 
 for i in range(10):
     game.runRound()
